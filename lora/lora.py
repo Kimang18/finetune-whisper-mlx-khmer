@@ -33,6 +33,13 @@ from datasets import load_dataset, Audio, concatenate_datasets
 # Configure typealias for batched inputs
 from collections import namedtuple
 
+import logging
+import coloredlogs
+
+log = logging.getLogger(__name__)
+coloredlogs.install(level='INFO')
+
+
 BatchInput = namedtuple(
     "BatchInput", "input_features dec_input_tokens token_lengths")
 issubclass(BatchInput, tuple)
@@ -74,7 +81,7 @@ def build_parser():
         help="Number of validation batches, -1 uses the entire validation set.",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=1e-5, help="Adam learning rate."
+        "--learning-rate", type=float, default=4e-5, help="Adam learning rate."
     )
     parser.add_argument(
         "--steps-per-report",
@@ -125,7 +132,7 @@ def load_google(args):
     hf_dataset = "google/fleurs"
 
     hf_dataset_lang = "km_kh"
-    print(f"Loading dataset {hf_dataset}, {hf_dataset_lang} from hugging face")
+    log.info(f"Loading dataset {hf_dataset}, {hf_dataset_lang} from hugging face")
 
     dataset = load_dataset(
         hf_dataset,
@@ -216,31 +223,30 @@ def get_array_mel_segments(audio_arrs: List[np.array], n_mels: int, dtype) -> mx
 
 
 def get_array_dec_input(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.array, mx.array]:
+    batch_size = len(texts)
     batch = [
-        [*tokenizer.sot_sequence_including_notimestamps] +
+        #[*tokenizer.sot_sequence_including_notimestamps] +
         tokenizer.encode(word_tokenize(
             text, separator=" ", return_tokens=False))
         for text in texts]  # add eot of tokenizer at the end
-    for x in batch:
-        if x[-1] != tokenizer.eot:
-            x.append(tokenizer.eot)
+    # for x in batch:
+    #     if x[-1] != tokenizer.eot:
+    #         x.append(tokenizer.eot)
     lengths = [len(x) for x in batch]
 
     # Pad to the nearest multiple of 8 or the maximum length
     pad_to = 8
-    max_length_in_batch = pad_to * \
-        ((max(lengths) + pad_to - 1) // pad_to)
+    max_length_in_batch = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
-    batch_arr = tokenizer.eot * np.ones(
-        (len(texts), max_length_in_batch), np.int32)
-    for j in range(len(texts)):
+    batch_arr = np.zeros( # tokenizer.eot * np.ones(
+        (batch_size, max_length_in_batch), np.int32)
+    for j in range(batch_size):
         truncated_length = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
-        lengths[j] = truncated_length
+        lengths[j] = (truncated_length)
 
     batch_arr_text_tokens = mx.array(batch_arr, dtype=mx.int32)
-    batch_arr_lengths = mx.array(lengths, dtype=mx.uint32)
-    return batch_arr_text_tokens, batch_arr_lengths
+    return batch_arr_text_tokens, mx.array(lengths)
 
 
 def evaluate(model, dataset, loss, tokenizer, batch_size, num_batches):
@@ -273,8 +279,15 @@ def loss(model, mels, dec_input_tokens, token_lengths):
 
 
 def train(model, train_set, val_set, loss, tokenizer, args):
-    print("Training")
-    optimizer = optim.Adam(learning_rate=args.learning_rate)
+    log.info("Training")
+    # optimizer = optim.Adam(learning_rate=args.learning_rate)
+    weight_decay = 0.01
+    adam_epsilon = 1e-8
+    optimizer = optim.AdamW(learning_rate=args.learning_rate,
+                            eps=adam_epsilon,
+                            weight_decay=weight_decay,
+                            bias_correction=True)
+
     dtype = mx.float16 if args.fp16 else mx.float32
 
     # Create value and grad function for loss
@@ -307,7 +320,7 @@ def train(model, train_set, val_set, loss, tokenizer, args):
             train_loss = np.mean(losses)
 
             stop = time.perf_counter()
-            print(
+            log.info(
                 f"Iter {it + 1}: Train loss {train_loss:.3f}, "
                 f"Tokens/sec {n_tokens / (stop - start):.3f}, "
                 f"It/sec {args.steps_per_report / (stop - start):.3f}, "
@@ -322,13 +335,13 @@ def train(model, train_set, val_set, loss, tokenizer, args):
             val_loss = evaluate(
                 model, val_set, loss, tokenizer, args.batch_size, args.val_batches
             )
-            print(
+            log.info(
                 f"Iter {it + 1}: "
                 f"Val loss {val_loss:.3f}, "
                 f"Val took {(time.perf_counter() - stop):.3f}s"
             )
-            # transcribe("./tests/voice5.mp3", model=model,
-            #            fp16=args.fp16, verbose=True)
+            transcribe("./tests/voice5.mp3", model=model,
+                       fp16=args.fp16, verbose=True)
             start = time.perf_counter()
 
         # Save adapter weights if needed
@@ -336,7 +349,7 @@ def train(model, train_set, val_set, loss, tokenizer, args):
             mx.savez(
                 args.adapter_file, **dict(tree_flatten(model.trainable_parameters()))
             )
-            print(
+            log.info(
                 f"Iter {it + 1}: Saved adapter weights to {args.adapter_file}.")
 
 
@@ -353,20 +366,20 @@ if __name__ == "__main__":
     dtype = mx.float16 if args.fp16 else mx.float32
     model, tokenizer, config = lora_utils.load(
         args.model, dtype, tokenizer_config)
-    print("tokenizer language", tokenizer.language)
+    log.info("tokenizer language", tokenizer.language)
 
     # # Freeze all layers & create LORA layers
     model.freeze()
     lora_utils.linear_to_lora(model, args.lora_layers)
 
     # Load dataset
-    print("Loading datasets")
+    log.info("Loading datasets")
     # load_google(args)  # load(args)
     train_set, val_set, test_set = load(args)
 
     # Resume training the given adapters.
     if args.resume_adapter_file is not None:
-        print(f"Loading pretrained adapters from {args.resume_adapter_file}")
+        log.info(f"Loading pretrained adapters from {args.resume_adapter_file}")
         model.load_weights(args.resume_adapter_file, strict=False)
 
     if args.train:
@@ -387,7 +400,7 @@ if __name__ == "__main__":
     model.load_weights(args.adapter_file, strict=False)
 
     if args.test:
-        print("Testing")
+        log.info("Testing")
         model.eval()
         test_loss = evaluate(
             model,
@@ -399,5 +412,5 @@ if __name__ == "__main__":
         )
         test_ppl = math.exp(test_loss)
 
-        print(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")
-        print(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")
+        log.info(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")
+        log.info(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")

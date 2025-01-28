@@ -15,6 +15,12 @@ import mlx_whisper.whisper as whisper
 
 from model import LoRALinear
 
+import logging
+import coloredlogs
+
+log = logging.getLogger(__name__)
+coloredlogs.install(level='INFO')
+
 class ModelHodler:
     model = None
     model_path = None
@@ -54,7 +60,7 @@ def linear_to_lora_layers(
             dropout=dropout,
         )
     keys = set(["query", "key", "value"])
-    rank, scale, dropout = 16, 8.0, 0.0
+    rank, scale, dropout = 8, 16.0, 0.0
     for b in model.blocks[-max(num_layers, 0) :]:
         lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
         if lora_layers:
@@ -64,36 +70,39 @@ def linear_to_lora_layers(
         model.update_modules(tree_unflatten(lora_modules))
 
 def linear_to_lora(model, num_layers, verbose=True):
-    print(f"Applying LoRA parameters to AudioEncoder...")
+    # print(f"Applying LoRA parameters to AudioEncoder...")
+    log.info(f"Applying LoRA parameters to AudioEncoder...")
     linear_to_lora_layers(model.encoder, num_layers)
     if verbose:
-        print("Done applying Encoder LoRA Linear layers")
+        # print("Done applying Encoder LoRA Linear layers")
+        log.info("Done applying Encoder LoRA Linear layers")
         enc_tot_params = (
             sum(v.size for _, v in tree_flatten(model.encoder.parameters())) / 10**6
         )
-        print(f"Encoder: Total parameters {enc_tot_params:.3f}M")
+        # print(f"Encoder: Total parameters {enc_tot_params:.3f}M")
+        log.info(f"Encoder: Total parameters {enc_tot_params:.3f}M")
         enc_tra_params = (
             sum(v.size for _, v in tree_flatten(
                 model.encoder.trainable_parameters()))
             / 10**6
         )
-        print(f"Encoder: Trainable parameters {enc_tra_params:.3f}M")
+        log.info(f"Encoder: Trainable parameters {enc_tra_params:.3f}M")
 
-    print(f"Applying LoRA parameters to TextDecoder...")
+    log.info(f"Applying LoRA parameters to TextDecoder...")
     linear_to_lora_layers(model.decoder, num_layers)
     if verbose:
-        print("Done applying Decoder LoRA Linear layers")
+        log.info("Done applying Decoder LoRA Linear layers")
         dec_tot_params = (
             sum(v.size for _, v in tree_flatten(model.decoder.parameters())) / 10**6
         )
-        print(f"Decoder: Total parameters {dec_tot_params:.3f}M")
+        log.info(f"Decoder: Total parameters {dec_tot_params:.3f}M")
         dec_tra_params = (
             sum(v.size for _, v in tree_flatten(
                 model.decoder.trainable_parameters()))
             / 10**6
         )
-        print(f"Decoder: Trainable parameters {dec_tra_params:.3f}M")
-        print("Finished adding LoRA params! :)")
+        log.info(f"Decoder: Trainable parameters {dec_tra_params:.3f}M")
+        log.info("Finished adding LoRA params! :)")
 
 
 def load(path_or_hf_repo: str, dtype=mx.float16, tokenizer_config={}):
