@@ -41,7 +41,7 @@ coloredlogs.install(level='INFO')
 
 
 BatchInput = namedtuple(
-    "BatchInput", "input_features dec_input_tokens token_lengths")
+    "BatchInput", "input_features dec_input_tokens target_tokens token_lengths")
 issubclass(BatchInput, tuple)
 
 
@@ -132,7 +132,8 @@ def load_google(args):
     hf_dataset = "google/fleurs"
 
     hf_dataset_lang = "km_kh"
-    log.info(f"Loading dataset {hf_dataset}, {hf_dataset_lang} from hugging face")
+    log.info(f"Loading dataset {hf_dataset}, {
+             hf_dataset_lang} from hugging face")
 
     dataset = load_dataset(
         hf_dataset,
@@ -183,7 +184,7 @@ def iterate_batches(dset, tokenizer, batch_size, dtype=mx.float16, model_n_mels=
                 dtype
             )
 
-            batch_arr_text_tokens, batch_token_lengths = get_array_dec_input(
+            batch_arr_text_tokens, batch_arr_target_tokens, batch_token_lengths = get_array_dec_input(
                 [ds[j]["transcription"] for j in range(len(ds))],
                 tokenizer,
                 max_seq_length
@@ -191,6 +192,7 @@ def iterate_batches(dset, tokenizer, batch_size, dtype=mx.float16, model_n_mels=
 
             yield BatchInput(input_features=batch_arr_mels,
                              dec_input_tokens=batch_arr_text_tokens,
+                             target_tokens=batch_arr_target_tokens,
                              token_lengths=batch_token_lengths,
                              )
             if len(ds) < batch_size:  # whole pass over dataset
@@ -228,25 +230,31 @@ def get_array_dec_input(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx
         [*tokenizer.sot_sequence_including_notimestamps] +
         tokenizer.encode(word_tokenize(
             text, separator=" ", return_tokens=False))
-        for text in texts]  # add eot of tokenizer at the end
-    for x in batch:
-        if x[-1] != tokenizer.eot:
-            x.append(tokenizer.eot)
+        for text in texts]
+    batch_target = [x[1:] + [tokenizer.eot] for x in batch]
+    # for x in batch:
+    #     if x[-1] != tokenizer.eot:
+    #         x.append(tokenizer.eot)
     lengths = [len(x) for x in batch]
 
     # Pad to the nearest multiple of 8 or the maximum length
     pad_to = 8
     max_length_in_batch = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
-    batch_arr = np.zeros( # tokenizer.eot * np.ones(
+    batch_arr = tokenizer.eot * np.ones(
+        (batch_size, max_length_in_batch), np.int32)
+    batch_arr_target = -100 * np.ones(  # tokenizer.eot * np.ones(
         (batch_size, max_length_in_batch), np.int32)
     for j in range(batch_size):
         truncated_length = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
+        batch_arr_target[j,
+                         :truncated_length] = batch_target[j][:truncated_length]
         lengths[j] = (truncated_length)
 
     batch_arr_text_tokens = mx.array(batch_arr, dtype=mx.int32)
-    return batch_arr_text_tokens, mx.array(lengths)
+    batch_arr_target_tokens = mx.array(batch_arr_target, dtype=mx.int32)
+    return batch_arr_text_tokens, batch_arr_target_tokens, mx.array(lengths)
 
 
 def evaluate(model, dataset, loss, tokenizer, batch_size, num_batches):
@@ -265,13 +273,14 @@ def evaluate(model, dataset, loss, tokenizer, batch_size, num_batches):
     return np.sum(all_losses) / ntokens
 
 
-def loss(model, mels, dec_input_tokens, token_lengths):
+def loss(model, mels, dec_input_tokens, target_tokens, token_lengths):
     # Run model on inputs
     logits = model(mels, dec_input_tokens)
     logits = logits.astype(mx.float32)
-    length_mask = mx.arange(dec_input_tokens.shape[1])[None, :] < token_lengths[:, None]
+    length_mask = mx.arange(target_tokens.shape[1])[
+        None, :] < token_lengths[:, None]
 
-    ce = nn.losses.cross_entropy(logits, dec_input_tokens) * length_mask
+    ce = nn.losses.cross_entropy(logits, target_tokens) * length_mask
     ntoks = length_mask.sum()
     ce = ce.sum() / ntoks
 
@@ -379,7 +388,8 @@ if __name__ == "__main__":
 
     # Resume training the given adapters.
     if args.resume_adapter_file is not None:
-        log.info(f"Loading pretrained adapters from {args.resume_adapter_file}")
+        log.info(f"Loading pretrained adapters from {
+                 args.resume_adapter_file}")
         model.load_weights(args.resume_adapter_file, strict=False)
 
     if args.train:
