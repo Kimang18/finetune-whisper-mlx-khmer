@@ -46,6 +46,7 @@ def linear_to_lora_layers(
         starting from the last layer.
         rank, scale, and optional layer keys.
     """
+    rank, alpha, dropout = 32, 64, 0.05
     if num_layers > len(model.blocks):
         raise ValueError(
             f"Requested {num_layers} LoRA layers "
@@ -56,15 +57,18 @@ def linear_to_lora_layers(
         return LoRALinear.from_base(
             layer,
             r=rank,
-            scale=scale,
+            alpha=alpha,
             dropout=dropout,
         )
-    keys = set(["query", "key", "value"])
-    rank, scale, dropout = 8, 16.0, 0.0
+    keys = set(["query", "value"])
     for b in model.blocks[-max(num_layers, 0) :]:
         lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
         if lora_layers:
             b.attn.update_modules(tree_unflatten(lora_layers))
+        lora_modules = [(k, to_lora(l)) for k, l in b.named_modules() if k in keys]
+        if lora_modules:
+            b.update_modules(tree_unflatten(lora_modules))
+
     lora_modules = [(k, to_lora(l)) for k, l in model.named_modules() if k in keys]
     if lora_modules:
         model.update_modules(tree_unflatten(lora_modules))

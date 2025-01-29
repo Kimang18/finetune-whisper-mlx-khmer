@@ -9,9 +9,9 @@ class LoRALinear(nn.Module):
     @staticmethod
     def from_base(
         linear: nn.Linear,
-        r: int = 8,
-        dropout: float = 0.0,
-        scale: float = 20.0,
+        r: int = 32,
+        dropout: float = 0.05,
+        alpha: int = 64,
     ):
         # TODO remove when input_dims and output_dims are attributes
         # on linear and quantized linear
@@ -23,7 +23,7 @@ class LoRALinear(nn.Module):
             output_dims=output_dims,
             r=r,
             dropout=dropout,
-            scale=scale,
+            alpha=alpha,
         )
         lora_lin.linear = linear
         return lora_lin
@@ -68,9 +68,9 @@ class LoRALinear(nn.Module):
         self,
         input_dims: int,
         output_dims: int,
-        r: int = 8,
-        dropout: float = 0.0,
-        scale: float = 20.0,
+        r: int = 32,
+        dropout: float = 0.05,
+        alpha: int = 64,
         bias: bool = False,
     ):
         super().__init__()
@@ -81,7 +81,7 @@ class LoRALinear(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         # Scale for low-rank update
-        self.scale = scale
+        self.scale = float(alpha)/math.sqrt(r)
 
         # Low rank lora weights
         scale = 1 / math.sqrt(input_dims)

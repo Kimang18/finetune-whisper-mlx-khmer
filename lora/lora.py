@@ -81,7 +81,7 @@ def build_parser():
         help="Number of validation batches, -1 uses the entire validation set.",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=4e-5, help="Adam learning rate."
+        "--learning-rate", type=float, default=5e-5, help="Adam learning rate."
     )
     parser.add_argument(
         "--steps-per-report",
@@ -225,13 +225,13 @@ def get_array_mel_segments(audio_arrs: List[np.array], n_mels: int, dtype) -> mx
 def get_array_dec_input(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.array, mx.array]:
     batch_size = len(texts)
     batch = [
-        #[*tokenizer.sot_sequence_including_notimestamps] +
+        [*tokenizer.sot_sequence_including_notimestamps] +
         tokenizer.encode(word_tokenize(
             text, separator=" ", return_tokens=False))
         for text in texts]  # add eot of tokenizer at the end
-    # for x in batch:
-    #     if x[-1] != tokenizer.eot:
-    #         x.append(tokenizer.eot)
+    for x in batch:
+        if x[-1] != tokenizer.eot:
+            x.append(tokenizer.eot)
     lengths = [len(x) for x in batch]
 
     # Pad to the nearest multiple of 8 or the maximum length
@@ -366,7 +366,7 @@ if __name__ == "__main__":
     dtype = mx.float16 if args.fp16 else mx.float32
     model, tokenizer, config = lora_utils.load(
         args.model, dtype, tokenizer_config)
-    log.info("tokenizer language", tokenizer.language)
+    log.info(f"tokenizer language {tokenizer.language}")
 
     # # Freeze all layers & create LORA layers
     model.freeze()
