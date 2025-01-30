@@ -81,7 +81,7 @@ def build_parser():
         help="Number of validation batches, -1 uses the entire validation set.",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=5e-5, help="Adam learning rate."
+        "--learning-rate", type=float, default=1e-4, help="Adam learning rate."
     )
     parser.add_argument(
         "--steps-per-report",
@@ -184,7 +184,7 @@ def iterate_batches(dset, tokenizer, batch_size, dtype=mx.float16, model_n_mels=
                 dtype
             )
 
-            batch_arr_text_tokens, batch_arr_target_tokens, batch_token_lengths = get_array_dec_input(
+            batch_arr_text_tokens, batch_arr_target_tokens, batch_token_lengths = get_array_tokens(
                 [ds[j]["transcription"] for j in range(len(ds))],
                 tokenizer,
                 max_seq_length
@@ -224,7 +224,7 @@ def get_array_mel_segments(audio_arrs: List[np.array], n_mels: int, dtype) -> mx
     )
 
 
-def get_array_dec_input(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.array, mx.array]:
+def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.array, mx.array]:
     batch_size = len(texts)
     batch = [
         [*tokenizer.sot_sequence_including_notimestamps] +
@@ -232,28 +232,24 @@ def get_array_dec_input(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx
             text, separator=" ", return_tokens=False))
         for text in texts]
     batch_target = [x[1:] + [tokenizer.eot] for x in batch]
-    # for x in batch:
-    #     if x[-1] != tokenizer.eot:
-    #         x.append(tokenizer.eot)
     lengths = [len(x) for x in batch]
 
     # Pad to the nearest multiple of 8 or the maximum length
     pad_to = 8
     max_length_in_batch = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
+
     batch_arr = tokenizer.eot * np.ones(
         (batch_size, max_length_in_batch), np.int32)
-    batch_arr_target = -100 * np.ones(  # tokenizer.eot * np.ones(
-        (batch_size, max_length_in_batch), np.int32)
+    batch_arr_tars = -100 * np.ones_like(batch_arr)
     for j in range(batch_size):
         truncated_length = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
-        batch_arr_target[j,
-                         :truncated_length] = batch_target[j][:truncated_length]
+        batch_arr_tars[j, :truncated_length] = batch_target[j][:truncated_length]
         lengths[j] = (truncated_length)
 
     batch_arr_text_tokens = mx.array(batch_arr, dtype=mx.int32)
-    batch_arr_target_tokens = mx.array(batch_arr_target, dtype=mx.int32)
+    batch_arr_target_tokens = mx.array(batch_arr_tars, dtype=mx.int32)
     return batch_arr_text_tokens, batch_arr_target_tokens, mx.array(lengths)
 
 
