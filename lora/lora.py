@@ -147,6 +147,26 @@ def load_google(args):
     return train, valid, test
 
 
+def load_mix(args):
+    dataset1 = load_dataset(
+        "google/fleurs",
+        "km_kh",
+        trust_remote_code=True,
+    )
+    dataset1 = dataset1.select_columns(["audio", "transcription"])
+    # dataset1 = dataset1.cast_column("audio", Audio(sampling_rate=16000))
+    train, valid, test = dataset1["train"], dataset1["validation"], dataset1["test"]
+    train = train.cast_column("audio", Audio(sampling_rate=16000))
+    # print(train.features)
+
+    dataset2 = load_dataset("seanghay/km-speech-corpus")
+    dataset2 = dataset2.select_columns(["audio", "transcription"])
+    dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
+    train = concatenate_datasets([train, dataset2])
+
+    return train.to_iterable_dataset(), valid.to_iterable_dataset(), test.to_iterable_dataset()
+
+
 def load(args):
     # dataset2 = load_dataset("seanghay/khmer_mpwt_speech")
     # dataset2 = dataset2.select_columns(["audio", "transcription"])
@@ -380,7 +400,7 @@ if __name__ == "__main__":
     # Load dataset
     log.info("Loading datasets")
     # load_google(args)  # load(args)
-    train_set, val_set, test_set = load(args)
+    train_set, val_set, test_set = load_mix(args)
 
     # Resume training the given adapters.
     if args.resume_adapter_file is not None:
