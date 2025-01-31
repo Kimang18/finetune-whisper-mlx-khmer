@@ -261,7 +261,7 @@ def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.ar
 
     batch_arr = tokenizer.eot * np.ones(
         (batch_size, max_length_in_batch), np.int32)
-    batch_arr_tars = -100 * np.ones_like(batch_arr)
+    batch_arr_tars = np.zeros_like(batch_arr)
     for j in range(batch_size):
         truncated_length = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
@@ -306,7 +306,7 @@ def loss(model, mels, dec_input_tokens, target_tokens, token_lengths):
 def train(model, train_set, val_set, loss, tokenizer, args):
     log.info("Training")
     # optimizer = optim.Adam(learning_rate=args.learning_rate)
-    weight_decay = 0.01
+    weight_decay = 0.001
     adam_epsilon = 1e-8
     optimizer = optim.AdamW(learning_rate=args.learning_rate,
                             eps=adam_epsilon,
