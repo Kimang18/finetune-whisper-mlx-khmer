@@ -46,7 +46,7 @@ def linear_to_lora_layers(
         starting from the last layer.
         rank, scale, and optional layer keys.
     """
-    rank, alpha, dropout = 16, 64, 0.01
+    rank, alpha, dropout = 32, 128, 0.01
     if num_layers > len(model.blocks):
         raise ValueError(
             f"Requested {num_layers} LoRA layers "
@@ -60,11 +60,16 @@ def linear_to_lora_layers(
             alpha=alpha,
             dropout=dropout,
         )
-    keys = set(["query", "key", "value"])
+    keys = set(["query", "key", "value", "out"])
     for b in model.blocks[-max(num_layers, 0) :]:
         lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
         if lora_layers:
             b.attn.update_modules(tree_unflatten(lora_layers))
+        # if b.cross_attn:
+        #     lora_layers = [(k, to_lora(l)) for k, l in b.cross_attn.named_modules() if k in keys]
+        #     if lora_layers:
+        #         b.cross_attn.update_modules(tree_unflatten(lora_layers))
+
         lora_modules = [(k, to_lora(l)) for k, l in b.named_modules() if k in keys]
         if lora_modules:
             b.update_modules(tree_unflatten(lora_modules))
@@ -130,6 +135,20 @@ def make_shards(weights: dict, max_file_size_gibibyte: int = 15):
     shards = []
     shard, shard_size = {}, 0
     for k, v in weights.items():
+        if shard_size + v.nbytes > max_file_size_bytes:
+            shards.append(shard)
+            shard, shard_size = {}, 0
+        shard[k] = v
+        shard_size += v.nbytes
+    shards.append(shard)
+    return shards
+
+
+def make_shards_0(weights: dict, max_file_size_gibibyte: int = 15):
+    max_file_size_bytes = max_file_size_gibibyte << 30
+    shards = []
+    shard, shard_size = {}, 0
+    for k, v in weights.items():
         estimated_size = v.size * v.dtype.size
         if shard_size + estimated_size > max_file_size_bytes:
             shards.append(shard)
@@ -143,7 +162,46 @@ def make_shards(weights: dict, max_file_size_gibibyte: int = 15):
 def save_model(save_dir: str, weights, tokenizer, config):
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    shards = make_shards(weights)
+
+    shards = make_shards(weights, max_file_size_gibibyte=5)
+    shards_count = len(shards)
+    shard_file_format = (
+        "model-{:05d}-of-{:05d}.safetensors"
+        if shards_count > 1
+        else "model.safetensors"
+    )
+
+    total_size = sum(v.nbytes for v in weights.values())
+    index_data = {"metadata": {"total_size": total_size}, "weight_map": {}}
+
+    for i, shard in enumerate(shards):
+        shard_name = shard_file_format.format(i+1, shards_count)
+        mx.save_safetensors(
+            str(save_dir / shard_name), shard, metadata={"format": "mlx"}
+        )
+        for weight_name in shard.keys():
+            index_data["weight_map"][weight_name] = shard_name
+        del shard
+
+    # todo: whisper-lora: investigate if `tokenizer.save_pretrained(save_dir)` is necessary?
+    # tokenizer.save_pretrained(save_dir)
+    with open(save_dir / "config.json", "w") as fid:
+        json.dump(config, fid, indent=4)
+
+    index_data["weight_map"] = {
+        k: index_data["weight_map"][k] for k in sorted(index_data["weight_map"])
+    }
+    with open(save_dir / "model.safetensors.index.json", "w") as f:
+        json.dump(
+            index_data,
+            f,
+            indent=4,
+        )
+
+def save_model_0(save_dir: str, weights, tokenizer, config):
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    shards = make_shards_0(weights)
     for i, shard in enumerate(shards):
         # TODO use HF file name scheme for simplicity
         mx.savez(str(save_dir / f"weights.npz"), **shard)
