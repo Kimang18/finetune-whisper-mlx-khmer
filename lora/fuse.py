@@ -26,10 +26,15 @@ if __name__ == "__main__":
         default="adapters.npz",
         help="Path to the trained adapter weights (npz or safetensors).",
     )
+    parser.add_argument(
+        "--fp16",
+        default=True,
+        help="Load data type float 16",
+    )
 
     args = parser.parse_args()
 
-    dtype = mx.float16 if args.get("fp16", True) else mx.float32
+    dtype = mx.float16 if args.fp16 else mx.float32
     model, tokenizer, config = lora_utils.load(args.model, dtype=dtype)
 
     # Load adapters and get number of LoRA layers
