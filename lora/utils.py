@@ -46,7 +46,8 @@ def linear_to_lora_layers(
         starting from the last layer.
         rank, scale, and optional layer keys.
     """
-    rank, alpha, dropout = 32, 128, 0.01
+    rank, alpha, dropout = 32, 64, 0.1 # Stage 1
+    # rank, alpha, dropout = 32, 64, 0.1
     if num_layers > len(model.blocks):
         raise ValueError(
             f"Requested {num_layers} LoRA layers "
@@ -60,7 +61,8 @@ def linear_to_lora_layers(
             alpha=alpha,
             dropout=dropout,
         )
-    keys = set(["query", "key", "value", "out"])
+    # keys = set(["query", "key", "value", "out"]) # State 1
+    keys = set(["query", "value"])
     for b in model.blocks[-max(num_layers, 0) :]:
         lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
         if lora_layers:
@@ -166,9 +168,9 @@ def save_model(save_dir: str, weights, tokenizer, config):
     shards = make_shards(weights, max_file_size_gibibyte=5)
     shards_count = len(shards)
     shard_file_format = (
-        "model-{:05d}-of-{:05d}.safetensors"
+        "weights-{:05d}-of-{:05d}.safetensors"
         if shards_count > 1
-        else "model.safetensors"
+        else "weights.safetensors"
     )
 
     total_size = sum(v.nbytes for v in weights.values())

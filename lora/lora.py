@@ -132,8 +132,7 @@ def load_google(args):
     hf_dataset = "google/fleurs"
 
     hf_dataset_lang = "km_kh"
-    log.info(f"Loading dataset {hf_dataset}, {
-             hf_dataset_lang} from hugging face")
+    log.info(f"Loading dataset {hf_dataset}, {hf_dataset_lang} from hugging face")
 
     dataset = load_dataset(
         hf_dataset,
@@ -159,10 +158,15 @@ def load_mix(args):
     train = train.cast_column("audio", Audio(sampling_rate=16000))
     # print(train.features)
 
-    dataset2 = load_dataset("seanghay/km-speech-corpus")
-    dataset2 = dataset2.select_columns(["audio", "transcription"])
-    dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
-    train = concatenate_datasets([train, dataset2])
+    # dataset2 = load_dataset("seanghay/km-speech-corpus")
+    # dataset2 = dataset2.select_columns(["audio", "transcription"])
+    # dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
+
+    dataset3 = load_dataset("seanghay/khmer_mpwt_speech")
+    dataset3 = dataset3.select_columns(["audio", "transcription"])
+    dataset3 = dataset3['train'].cast_column("audio", Audio(sampling_rate=16000))
+
+    train = concatenate_datasets([train, dataset3])
 
     return train.to_iterable_dataset(), valid.to_iterable_dataset(), test.to_iterable_dataset()
 
@@ -251,22 +255,25 @@ def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.ar
         tokenizer.encode(word_tokenize(
             text, separator=" ", return_tokens=False))
         for text in texts]
-    batch_target = [x[1:] + [tokenizer.eot] for x in batch]
-    lengths = [len(x) for x in batch]
+    for x in batch:
+        if x[-1] != tokenizer.eot:
+            x.append(tokenizer.eot)
+    batch_target = [x[1:] for x in batch]
 
+    lengths = [len(x) for x in batch]
     # Pad to the nearest multiple of 8 or the maximum length
     pad_to = 8
     max_length_in_batch = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
 
-    batch_arr = tokenizer.eot * np.ones(
+    batch_arr = np.zeros(
         (batch_size, max_length_in_batch), np.int32)
     batch_arr_tars = np.zeros_like(batch_arr)
     for j in range(batch_size):
         truncated_length = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
-        batch_arr_tars[j, :truncated_length] = batch_target[j][:truncated_length]
-        lengths[j] = (truncated_length)
+        batch_arr_tars[j, :truncated_length-1] = batch_target[j][:truncated_length-1]
+        lengths[j] = (truncated_length-1)
 
     batch_arr_text_tokens = mx.array(batch_arr, dtype=mx.int32)
     batch_arr_target_tokens = mx.array(batch_arr_tars, dtype=mx.int32)
@@ -306,9 +313,16 @@ def loss(model, mels, dec_input_tokens, target_tokens, token_lengths):
 def train(model, train_set, val_set, loss, tokenizer, args):
     log.info("Training")
     # optimizer = optim.Adam(learning_rate=args.learning_rate)
-    weight_decay = 0.001
+    warmup_steps = 400
+    decay_steps = args.iters - warmup_steps
+    warmup = optim.linear_schedule(0.0, args.learning_rate, steps=warmup_steps)
+    # lin_decay = optim.linear_schedule(args.learning_rate, 1e-7, steps=decay_steps)
+    lin_decay = optim.cosine_decay(args.learning_rate, end=1e-7, decay_steps=decay_steps)
+    scheduler = optim.join_schedules([warmup, lin_decay], [warmup_steps])
+
+    weight_decay = 0.01
     adam_epsilon = 1e-8
-    optimizer = optim.AdamW(learning_rate=args.learning_rate,
+    optimizer = optim.AdamW(learning_rate=scheduler,
                             eps=adam_epsilon,
                             weight_decay=weight_decay,
                             bias_correction=True)
