@@ -47,7 +47,7 @@ def linear_to_lora_layers(
         starting from the last layer.
         rank, scale, and optional layer keys.
     """
-    rank, alpha, dropout = 64, 32, 0.1 # Stage 1
+    rank, alpha, dropout = 64, 16, 0.1 # Stage 1
     # rank, alpha, dropout = 32, 64, 0.1
     if num_layers > len(model.blocks):
         raise ValueError(
@@ -62,16 +62,16 @@ def linear_to_lora_layers(
             alpha=alpha,
             dropout=dropout,
         )
-    keys = set(["query", "key", "value", "out", "mlp1", "mlp2"]) # State 1
-    # keys = set(["query", "key", "value", "mlp1"])
+    # keys = set(["query", "key", "value", "out", "mlp1", "mlp2"]) # State 1
+    keys = set(["query", "key", "value", "out"])
     for b in model.blocks[-max(num_layers, 0) :]:
         lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
         if lora_layers:
             b.attn.update_modules(tree_unflatten(lora_layers))
-        # if b.cross_attn:
-        #     lora_layers = [(k, to_lora(l)) for k, l in b.cross_attn.named_modules() if k in keys]
-        #     if lora_layers:
-        #         b.cross_attn.update_modules(tree_unflatten(lora_layers))
+        if b.cross_attn:
+            lora_layers = [(k, to_lora(l)) for k, l in b.cross_attn.named_modules() if k in keys]
+            if lora_layers:
+                b.cross_attn.update_modules(tree_unflatten(lora_layers))
 
         # lora_modules = [(k, to_lora(l)) for k, l in b.named_modules() if k in keys]
         # if lora_modules:
