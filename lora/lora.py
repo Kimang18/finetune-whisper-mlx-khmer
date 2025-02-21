@@ -3,6 +3,8 @@ import argparse
 import math
 import time
 from pathlib import Path
+import sys
+sys.setrecursionlimit(10000)
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -12,8 +14,8 @@ import utils as lora_utils
 from khmernltk import word_tokenize
 from mlx_whisper import transcribe
 
-# import evaluate
-# metric_wer = evaluate.load("wer")
+import evaluate
+metric_wer = evaluate.load("wer")
 
 from mlx.utils import tree_flatten
 
@@ -66,7 +68,7 @@ def build_parser():
     parser.add_argument(
         "--lora-layers",
         type=int,
-        default=16,
+        default=-1,
         help="Number of layers to fine-tune",
     )
     parser.add_argument("--batch-size", type=int,
@@ -81,7 +83,7 @@ def build_parser():
         help="Number of validation batches, -1 uses the entire validation set.",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=1e-4, help="Adam learning rate."
+        "--learning-rate", type=float, default=5e-4, help="Adam learning rate."
     )
     parser.add_argument(
         "--steps-per-report",
@@ -158,30 +160,30 @@ def load_mix(args):
     train = train.cast_column("audio", Audio(sampling_rate=16000))
     # print(train.features)
 
-    # dataset2 = load_dataset("seanghay/km-speech-corpus")
-    # dataset2 = dataset2.select_columns(["audio", "transcription"])
-    # dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
+    dataset2 = load_dataset("seanghay/km-speech-corpus")
+    dataset2 = dataset2.select_columns(["audio", "transcription"])
+    dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
 
     dataset3 = load_dataset("seanghay/khmer_mpwt_speech")
     dataset3 = dataset3.select_columns(["audio", "transcription"])
     dataset3 = dataset3['train'].cast_column("audio", Audio(sampling_rate=16000))
 
-    train = concatenate_datasets([train, dataset3])
+    train = concatenate_datasets([train, dataset2, dataset3])
 
     return train.to_iterable_dataset(), valid.to_iterable_dataset(), test.to_iterable_dataset()
 
 
-def load(args):
-    # dataset2 = load_dataset("seanghay/khmer_mpwt_speech")
-    # dataset2 = dataset2.select_columns(["audio", "transcription"])
-    # dataset2 = dataset2.cast_column("audio", Audio(sampling_rate=16000))
+def load_seanghay(args):
+    dataset1 = load_dataset("seanghay/khmer_mpwt_speech")
+    dataset1 = dataset1.select_columns(["audio", "transcription"])
+    dataset1 = dataset1['train'].cast_column("audio", Audio(sampling_rate=16000))
 
     dataset2 = load_dataset("seanghay/km-speech-corpus")
     dataset2 = dataset2.select_columns(["audio", "transcription"])
+    dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
 
-    # dataset2 = concatenate_datasets([dataset1['train'], dataset2['train']])
-
-    dataset2 = dataset2['train'].train_test_split(test_size=0.2)
+    dataset2 = concatenate_datasets([dataset1, dataset2])
+    dataset2 = dataset2.train_test_split(test_size=0.2)
     train, valid, test = dataset2['train'].to_iterable_dataset(
     ), dataset2['test'].to_iterable_dataset(), [-1]
 
@@ -193,7 +195,7 @@ def iterate_batches(dset, tokenizer, batch_size, dtype=mx.float16, model_n_mels=
     while True:
         if train:
             shuffled_dset = dset.shuffle(
-                seed=np.random.randint(0, 1000), buffer_size=10000)
+                seed=np.random.randint(0, 1000), buffer_size=20000)
         else:
             shuffled_dset = dset
 
@@ -252,8 +254,9 @@ def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.ar
     batch_size = len(texts)
     batch = [
         [*tokenizer.sot_sequence_including_notimestamps] +
-        tokenizer.encode(word_tokenize(
-            text, separator=" ", return_tokens=False))
+            # tokenizer.encode(word_tokenize(
+            #     text, separator=" ", return_tokens=False))
+            tokenizer.encode(text)
         for text in texts]
     for x in batch:
         if x[-1] != tokenizer.eot:
@@ -266,14 +269,21 @@ def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.ar
     max_length_in_batch = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
 
-    batch_arr = np.zeros(
+    batch_arr = tokenizer.eot * np.ones(
         (batch_size, max_length_in_batch), np.int32)
-    batch_arr_tars = np.zeros_like(batch_arr)
+    batch_arr_tars = tokenizer.eot * np.ones_like(batch_arr)
     for j in range(batch_size):
         truncated_length = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
         batch_arr_tars[j, :truncated_length-1] = batch_target[j][:truncated_length-1]
         lengths[j] = (truncated_length-1)
+
+    # sanity check
+    # special_tokens = tokenizer.special_tokens.values()
+    # for x, xx, t in zip(batch_arr, batch_arr_tars, texts):
+    #     print(tokenizer.decode([tok for tok in x if tok not in special_tokens]))
+    #     print(tokenizer.decode([tok for tok in xx if tok not in special_tokens]))
+    #     print(word_tokenize(t, separator=" ", return_tokens=False))
 
     batch_arr_text_tokens = mx.array(batch_arr, dtype=mx.int32)
     batch_arr_target_tokens = mx.array(batch_arr_tars, dtype=mx.int32)
@@ -282,18 +292,63 @@ def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.ar
 
 def evaluate(model, dataset, loss, tokenizer, batch_size, num_batches):
     all_losses = []
+    all_wers = []
     ntokens = 0
     for it, batch in zip(
         range(num_batches),
         iterate_batches(dataset, tokenizer, batch_size,
                         model_n_mels=model.dims.n_mels),
     ):
-        losses, ntoks = loss(model, *batch)
+        # losses, ntoks = loss(model, *batch)
+        losses, ntoks, wers = word_error(model, tokenizer, *batch)
         all_losses.append((losses * ntoks).item())
+        all_wers.append(wers)
         ntokens += ntoks
         mx.eval(all_losses, ntokens)
 
-    return np.sum(all_losses) / ntokens
+    return np.sum(all_losses) / ntokens, np.mean(all_wers)
+
+
+def word_error(model, tokenizer, mels, dec_input_tokens, target_tokens, token_lengths):
+    logits = model(mels, dec_input_tokens)
+    # logits = model(mels, target_tokens)
+    logits = logits.astype(mx.float32)
+    length_mask = mx.arange(target_tokens.shape[1])[
+        None, :] < token_lengths[:, None]
+    ce = nn.losses.cross_entropy(logits, target_tokens) * length_mask
+    ntoks = length_mask.sum()
+    ce = ce.sum() / ntoks
+
+    logits = np.array(logits, dtype=np.int32)
+    target_tokens = np.array(target_tokens, dtype=np.int32)
+
+    l_list, t_list= [], []
+
+    special_tokens = tokenizer.special_tokens.values()
+    # l = np.argmax(logits[0], axis=1)
+    # print(tokenizer.decode(l))
+    # l = [token for token in l if token not in special_tokens]
+    # t = [token for token in target_tokens[0] if token not in special_tokens]
+    # # print(len(t), len(target_tokens[0]))
+
+    # l = tokenizer.decode(l)
+    # # print("predi", l)
+
+    # t = tokenizer.decode(t)
+    # print("label", t)
+    # print("*************************")
+
+    for l, t in zip(logits, target_tokens):
+        l = np.argmax(l, axis=1)
+        l = [token for token in l if token not in special_tokens]
+        t = [token for token in t if token not in special_tokens]
+
+        l = tokenizer.decode(l)
+        t = tokenizer.decode(t)
+        l_list.append(l)
+        t_list.append(t)
+    wer = metric_wer.compute(references=t_list, predictions=l_list)
+    return ce, ntoks, wer
 
 
 def loss(model, mels, dec_input_tokens, target_tokens, token_lengths):
@@ -313,12 +368,14 @@ def loss(model, mels, dec_input_tokens, target_tokens, token_lengths):
 def train(model, train_set, val_set, loss, tokenizer, args):
     log.info("Training")
     # optimizer = optim.Adam(learning_rate=args.learning_rate)
-    warmup_steps = 400
-    decay_steps = args.iters - warmup_steps
+    warmup_steps = 0.05*args.iters
+    decay_steps2 = 0.1*args.iters
+    decay_steps1 = args.iters - warmup_steps - decay_steps2
     warmup = optim.linear_schedule(0.0, args.learning_rate, steps=warmup_steps)
-    # lin_decay = optim.linear_schedule(args.learning_rate, 1e-7, steps=decay_steps)
-    lin_decay = optim.cosine_decay(args.learning_rate, end=1e-7, decay_steps=decay_steps)
-    scheduler = optim.join_schedules([warmup, lin_decay], [warmup_steps])
+    # lin_decay = optim.linear_schedule(args.learning_rate, 0.0, steps=decay_steps)
+    lin_decay1 = optim.cosine_decay(args.learning_rate, end=1e-5, decay_steps=decay_steps1)
+    lin_decay2 = optim.cosine_decay(1e-5, end=0.0, decay_steps=decay_steps2)
+    scheduler = optim.join_schedules([warmup, lin_decay1, lin_decay2], [warmup_steps, decay_steps1+warmup_steps])
 
     weight_decay = 0.01
     adam_epsilon = 1e-8
@@ -327,7 +384,7 @@ def train(model, train_set, val_set, loss, tokenizer, args):
                             weight_decay=weight_decay,
                             bias_correction=True)
 
-    dtype = mx.float16 if args.fp16 else mx.float32
+    dtype = mx.float16 if eval(args.fp16) else mx.float32
 
     # Create value and grad function for loss
     loss_value_and_grad = nn.value_and_grad(model, loss)
@@ -339,7 +396,7 @@ def train(model, train_set, val_set, loss, tokenizer, args):
     # Main training loop
     for it, batch in zip(
         range(args.iters),
-        iterate_batches(train_set, tokenizer, args.batch_size,
+        iterate_batches(train_set, tokenizer, args.batch_size, dtype=dtype,
                         model_n_mels=model.dims.n_mels, train=True),
     ):
         # print(it, [*batch][0].shape, [*batch][1].shape, [*batch][2].shape)
@@ -371,16 +428,17 @@ def train(model, train_set, val_set, loss, tokenizer, args):
         # Report validation loss if needed
         if it == 0 or (it + 1) % args.steps_per_eval == 0:
             stop = time.perf_counter()
-            val_loss = evaluate(
+            val_loss, wer = evaluate(
                 model, val_set, loss, tokenizer, args.batch_size, args.val_batches
             )
             log.info(
                 f"Iter {it + 1}: "
                 f"Val loss {val_loss:.3f}, "
+                f"Val wer {wer:.3f}, "
                 f"Val took {(time.perf_counter() - stop):.3f}s"
             )
             transcribe("./tests/voice5.mp3", model=model,
-                       fp16=args.fp16, verbose=True)
+                       verbose=True, fp16=eval(args.fp16))
             start = time.perf_counter()
 
         # Save adapter weights if needed
@@ -402,7 +460,7 @@ if __name__ == "__main__":
     tokenizer_config = {}
     if args.train:
         tokenizer_config["language"] = "km"  # args.language
-    dtype = mx.float16 if args.fp16 else mx.float32
+    dtype = mx.float16 if eval(args.fp16) else mx.float32
     model, tokenizer, config = lora_utils.load(
         args.model, dtype, tokenizer_config)
     log.info(f"tokenizer language {tokenizer.language}")
@@ -414,12 +472,12 @@ if __name__ == "__main__":
     # Load dataset
     log.info("Loading datasets")
     # load_google(args)  # load(args)
-    train_set, val_set, test_set = load_mix(args)
+    # train_set, val_set, test_set = load_mix(args)
+    train_set, val_set, test_set = load_seanghay(args)
 
     # Resume training the given adapters.
     if args.resume_adapter_file is not None:
-        log.info(f"Loading pretrained adapters from {
-                 args.resume_adapter_file}")
+        log.info(f"Loading pretrained adapters from {args.resume_adapter_file}")
         model.load_weights(args.resume_adapter_file, strict=False)
 
     if args.train:
