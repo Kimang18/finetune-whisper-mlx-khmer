@@ -82,6 +82,7 @@ class LoRALinear(nn.Module):
 
         # Scale for low-rank update
         self.scale = float(alpha)/math.sqrt(r)
+        #self.scale = float(alpha)/float(r)
 
         # Low rank lora weights
         scale = 1 / math.sqrt(input_dims)
