@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Iterator, Any
 import argparse
 import math
 import time
@@ -13,6 +13,8 @@ import numpy as np
 import utils as lora_utils
 from khmernltk import word_tokenize
 from mlx_whisper import transcribe
+from mlx_whisper.tokenizer import Tokenizer
+from mlx_whisper.whisper import Whisper
 
 import evaluate
 metric_wer = evaluate.load("wer")
@@ -28,9 +30,14 @@ from mlx_whisper.audio import (
     pad_or_trim,
 )
 
+import tha.normalize
+import tha.datetime
+import tha.decimals
+import tha.ordinals
+import tha.currency
 
 # Huggingface datasets
-from datasets import load_dataset, Audio, concatenate_datasets
+from datasets import load_dataset, Audio, concatenate_datasets, IterableDataset
 
 # Configure typealias for batched inputs
 from collections import namedtuple
@@ -176,10 +183,12 @@ def load_mix(args):
 def load_seanghay(args):
     dataset1 = load_dataset("seanghay/khmer_mpwt_speech")
     dataset1 = dataset1.select_columns(["audio", "transcription"])
+    dataset1 = dataset1.map(transform_khmer_sentence)
     dataset1 = dataset1['train'].cast_column("audio", Audio(sampling_rate=16000))
 
     dataset2 = load_dataset("seanghay/km-speech-corpus")
     dataset2 = dataset2.select_columns(["audio", "transcription"])
+    dataset2 = dataset2.map(transform_khmer_sentence)
     dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
 
     dataset2 = concatenate_datasets([dataset1, dataset2])
@@ -190,21 +199,38 @@ def load_seanghay(args):
     return train, valid, test
 
 
-def iterate_batches(dset, tokenizer, batch_size, dtype=mx.float16, model_n_mels=80, max_seq_length=448, train=False):
+def transform_khmer_sentence(ds) -> Dict:
+    transcription = tha.normalize.processor(ds["transcription"])
+    l = [w for w in word_tokenize(transcription, return_tokens=True) if w != " "]
+    for j in range(len(l)):
+        w = l[j]
+        if "$" in w or "៛" in w:
+            w = tha.currency.processor(w)
+        else:
+            w = tha.datetime.time_processor(w)
+            w = tha.datetime.date_processor(w)
+            w = tha.decimals.processor(w)
+            w = tha.ordinals.processor(w)
+        l[j] = w.replace("▁", " ")
+    transcription = " ".join(l)
+    #transcription = word_tokenize(ds["transcription"], return_tokens=False, separator=" ")
+    return {"transcription": transcription}
+
+def iterate_batches(dset: IterableDataset, tokenizer: Tokenizer, batch_size: int, dtype=mx.float16, model_n_mels: int = 80, max_seq_length: int = 448, train: bool = False) -> Iterator[BatchInput]:
     # Shuffle indices
     while True:
         if train:
-            shuffled_dset = dset.shuffle(
+            shuffled_dset: IterableDataset = dset.shuffle(
                 seed=np.random.randint(0, 1000), buffer_size=20000)
         else:
-            shuffled_dset = dset
+            shuffled_dset: IterableDataset = dset
 
         # Collect batches from dataset
         while True:
-            ds = list(shuffled_dset.take(batch_size))
+            ds: List[Dict[str, Any]] = list(shuffled_dset.take(batch_size))
             if len(ds) == 0:
                 break
-            batch_arr_mels = get_array_mel_segments(
+            batch_arr_mels: mx.array = get_array_mel_segments(
                 [ds[j]['audio']['array'] for j in range(len(ds))],
                 model_n_mels,
                 dtype
@@ -230,7 +256,7 @@ def iterate_batches(dset, tokenizer, batch_size, dtype=mx.float16, model_n_mels=
 
 
 def get_array_mel_segments(audio_arrs: List[np.array], n_mels: int, dtype) -> mx.array:
-    batch_mel_segments = [
+    batch_mel_segments: List[mx.array] = [
         pad_or_trim(
             log_mel_spectrogram(
                 audio_arr, n_mels=n_mels, padding=N_SAMPLES),
@@ -250,30 +276,28 @@ def get_array_mel_segments(audio_arrs: List[np.array], n_mels: int, dtype) -> mx
     )
 
 
-def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.array, mx.array]:
-    batch_size = len(texts)
-    batch = [
+def get_array_tokens(texts: List[str], tokenizer: Tokenizer, max_seq_length: int) -> Tuple[mx.array, mx.array, mx.array]:
+    batch_size: int = len(texts)
+    batch: List[List[int]] = [
         [*tokenizer.sot_sequence_including_notimestamps] +
-            # tokenizer.encode(word_tokenize(
-            #     text, separator=" ", return_tokens=False))
             tokenizer.encode(text)
         for text in texts]
     for x in batch:
         if x[-1] != tokenizer.eot:
             x.append(tokenizer.eot)
-    batch_target = [x[1:] for x in batch]
+    batch_target: List[List[int]] = [x[1:] for x in batch]
 
-    lengths = [len(x) for x in batch]
+    lengths: List[int] = [len(x) for x in batch]
     # Pad to the nearest multiple of 8 or the maximum length
-    pad_to = 8
-    max_length_in_batch = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
+    pad_to: int = 8
+    max_length_in_batch: int = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
 
-    batch_arr = tokenizer.eot * np.ones(
+    batch_arr: np.array = tokenizer.eot * np.ones(
         (batch_size, max_length_in_batch), np.int32)
-    batch_arr_tars = tokenizer.eot * np.ones_like(batch_arr)
+    batch_arr_tars: np.array = tokenizer.eot * np.ones_like(batch_arr)
     for j in range(batch_size):
-        truncated_length = min(lengths[j], max_seq_length)
+        truncated_length: int = min(lengths[j], max_seq_length)
         batch_arr[j, :truncated_length] = batch[j][:truncated_length]
         batch_arr_tars[j, :truncated_length-1] = batch_target[j][:truncated_length-1]
         lengths[j] = (truncated_length-1)
@@ -285,8 +309,8 @@ def get_array_tokens(texts: List[str], tokenizer, max_seq_length) -> Tuple[mx.ar
     #     print(tokenizer.decode([tok for tok in xx if tok not in special_tokens]))
     #     print(word_tokenize(t, separator=" ", return_tokens=False))
 
-    batch_arr_text_tokens = mx.array(batch_arr, dtype=mx.int32)
-    batch_arr_target_tokens = mx.array(batch_arr_tars, dtype=mx.int32)
+    batch_arr_text_tokens: mx.array = mx.array(batch_arr, dtype=mx.int32)
+    batch_arr_target_tokens: mx.array = mx.array(batch_arr_tars, dtype=mx.int32)
     return batch_arr_text_tokens, batch_arr_target_tokens, mx.array(lengths)
 
 
@@ -351,15 +375,15 @@ def word_error(model, tokenizer, mels, dec_input_tokens, target_tokens, token_le
     return ce, ntoks, wer
 
 
-def loss(model, mels, dec_input_tokens, target_tokens, token_lengths):
+def loss(model: Whisper, mels: mx.array, dec_input_tokens: mx.array, target_tokens: mx.array, token_lengths: mx.array) -> Tuple[mx.array, int]:
     # Run model on inputs
-    logits = model(mels, dec_input_tokens)
+    logits: mx.array = model(mels, dec_input_tokens)
     logits = logits.astype(mx.float32)
-    length_mask = mx.arange(target_tokens.shape[1])[
+    length_mask: mx.array = mx.arange(target_tokens.shape[1])[
         None, :] < token_lengths[:, None]
 
-    ce = nn.losses.cross_entropy(logits, target_tokens) * length_mask
-    ntoks = length_mask.sum()
+    ce: mx.array = nn.losses.cross_entropy(logits, target_tokens) * length_mask
+    ntoks: int = length_mask.sum()
     ce = ce.sum() / ntoks
 
     return ce, ntoks
@@ -377,12 +401,13 @@ def train(model, train_set, val_set, loss, tokenizer, args):
     lin_decay2 = optim.cosine_decay(1e-5, end=0.0, decay_steps=decay_steps2)
     scheduler = optim.join_schedules([warmup, lin_decay1, lin_decay2], [warmup_steps, decay_steps1+warmup_steps])
 
-    weight_decay = 0.01
-    adam_epsilon = 1e-8
+    weight_decay = 0.1
+    adam_epsilon = 1e-9
     optimizer = optim.AdamW(learning_rate=scheduler,
+                            betas=(0.9, 0.98),
                             eps=adam_epsilon,
                             weight_decay=weight_decay,
-                            bias_correction=True)
+                            bias_correction=False)
 
     dtype = mx.float16 if eval(args.fp16) else mx.float32
 
