@@ -404,7 +404,7 @@ def train(model, train_set, val_set, loss, tokenizer, args):
     weight_decay = 0.1
     adam_epsilon = 1e-9
     optimizer = optim.AdamW(learning_rate=scheduler,
-                            betas=(0.9, 0.98),
+                            betas=(0.89, 0.79), # (0.88, ...)
                             eps=adam_epsilon,
                             weight_decay=weight_decay,
                             bias_correction=False)

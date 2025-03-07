@@ -12,7 +12,7 @@ from mlx.utils import tree_flatten, tree_unflatten
 from mlx_whisper.tokenizer import get_tokenizer
 from mlx_whisper.load_models import load_model
 
-import mlx_whisper.whisper as whisper
+# import mlx_whisper.whisper as whisper
 
 from model import LoRALinear
 
@@ -47,8 +47,8 @@ def linear_to_lora_layers(
         starting from the last layer.
         rank, scale, and optional layer keys.
     """
-    rank, alpha, dropout = 64, 16, 0.1 # Stage 1
-    # rank, alpha, dropout = 32, 64, 0.1
+    rank, alpha, dropout = 128, 256, 0.0 # base version
+    # rank, alpha, dropout = 192, 384, 0.15 # tiny version
     if num_layers > len(model.blocks):
         raise ValueError(
             f"Requested {num_layers} LoRA layers "
@@ -65,14 +65,17 @@ def linear_to_lora_layers(
     # keys = set(["query", "key", "value", "out", "mlp1", "mlp2"]) # State 1
     keys = set(["query", "key", "value", "out"])
     for b in model.blocks[-max(num_layers, 0) :]:
+        # add to Multi-Head Attention layers
         lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
         if lora_layers:
             b.attn.update_modules(tree_unflatten(lora_layers))
+        # add to Multi-Head Cross Attention layers
         if b.cross_attn:
             lora_layers = [(k, to_lora(l)) for k, l in b.cross_attn.named_modules() if k in keys]
             if lora_layers:
                 b.cross_attn.update_modules(tree_unflatten(lora_layers))
 
+        # add to Residual Attention block
         # lora_modules = [(k, to_lora(l)) for k, l in b.named_modules() if k in keys]
         # if lora_modules:
         #     b.update_modules(tree_unflatten(lora_modules))

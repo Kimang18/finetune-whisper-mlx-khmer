@@ -81,8 +81,8 @@ class LoRALinear(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         # Scale for low-rank update
-        self.scale = float(alpha)/math.sqrt(r)
-        #self.scale = float(alpha)/float(r)
+        #self.scale = float(alpha)/math.sqrt(r)
+        self.scale = float(alpha)/float(r)
 
         # Low rank lora weights
         scale = 1 / math.sqrt(input_dims)
