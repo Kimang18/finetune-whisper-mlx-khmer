@@ -37,6 +37,9 @@ class ModelHodler:
 def linear_to_lora_layers(
     model: nn.Module,
     num_layers: int,
+    rank: int,
+    alpha: int,
+    dropout: float
 ):
     """
     Convert some of the models linear layers to lora layers.
@@ -47,7 +50,7 @@ def linear_to_lora_layers(
         starting from the last layer.
         rank, scale, and optional layer keys.
     """
-    rank, alpha, dropout = 128, 256, 0.0 # base version
+    # rank, alpha, dropout = 128, 256, 0.0 # base version
     # rank, alpha, dropout = 192, 384, 0.15 # tiny version
     if num_layers > len(model.blocks):
         raise ValueError(
@@ -84,10 +87,10 @@ def linear_to_lora_layers(
     # if lora_modules:
     #     model.update_modules(tree_unflatten(lora_modules))
 
-def linear_to_lora(model, num_layers, verbose=True):
+def linear_to_lora(model, num_layers, rank=64, alpha=64, dropout=0.1, verbose=True):
     # print(f"Applying LoRA parameters to AudioEncoder...")
     log.info(f"Applying LoRA parameters to AudioEncoder...")
-    linear_to_lora_layers(model.encoder, num_layers)
+    linear_to_lora_layers(model.encoder, num_layers, rank, alpha, dropout)
     if verbose:
         # print("Done applying Encoder LoRA Linear layers")
         log.info("Done applying Encoder LoRA Linear layers")
@@ -104,7 +107,7 @@ def linear_to_lora(model, num_layers, verbose=True):
         log.info(f"Encoder: Trainable parameters {enc_tra_params:.3f}M")
 
     log.info(f"Applying LoRA parameters to TextDecoder...")
-    linear_to_lora_layers(model.decoder, num_layers)
+    linear_to_lora_layers(model.decoder, num_layers, rank, alpha, dropout)
     if verbose:
         log.info("Done applying Decoder LoRA Linear layers")
         dec_tot_params = (
