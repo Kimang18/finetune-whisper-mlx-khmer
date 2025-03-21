@@ -3,6 +3,7 @@ import json
 import logging
 from pathlib import Path
 import math
+from typing import Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -38,6 +39,8 @@ def linear_to_lora_layers(
     model: nn.Module,
     num_layers: int,
     rank: int,
+    target_modules: Tuple[str],
+    cross_target_modules: Tuple[str],
     alpha: int,
     dropout: float
 ):
@@ -65,32 +68,32 @@ def linear_to_lora_layers(
             alpha=alpha,
             dropout=dropout,
         )
-    # keys = set(["query", "key", "value", "out", "mlp1", "mlp2"]) # State 1
-    keys = set(["query", "key", "value", "out"])
+    keys = set(["query", "key", "value", "out", "mlp1", "mlp2"]) # State 1
+    # keys = set(["query", "key", "value", "out"])
     for b in model.blocks[-max(num_layers, 0) :]:
         # add to Multi-Head Attention layers
-        lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if k in keys]
+        lora_layers = [(k, to_lora(l)) for k, l in b.attn.named_modules() if (k != "") and (k in target_modules)]
         if lora_layers:
             b.attn.update_modules(tree_unflatten(lora_layers))
         # add to Multi-Head Cross Attention layers
         if b.cross_attn:
-            lora_layers = [(k, to_lora(l)) for k, l in b.cross_attn.named_modules() if k in keys]
+            lora_layers = [(k, to_lora(l)) for k, l in b.cross_attn.named_modules() if (k != "") and (k in cross_target_modules)]
             if lora_layers:
                 b.cross_attn.update_modules(tree_unflatten(lora_layers))
 
         # add to Residual Attention block
-        # lora_modules = [(k, to_lora(l)) for k, l in b.named_modules() if k in keys]
-        # if lora_modules:
-        #     b.update_modules(tree_unflatten(lora_modules))
+        lora_modules = [(k, to_lora(l)) for k, l in b.named_modules() if k in keys]
+        if lora_modules:
+            b.update_modules(tree_unflatten(lora_modules))
 
     # lora_modules = [(k, to_lora(l)) for k, l in model.named_modules() if k in keys]
     # if lora_modules:
     #     model.update_modules(tree_unflatten(lora_modules))
 
-def linear_to_lora(model, num_layers, rank=64, alpha=64, dropout=0.1, verbose=True):
+def linear_to_lora(model, num_layers, rank=64, target_modules=("query", "value"), cross_target_modules=("query", "value"), alpha=64, dropout=0.1, verbose=True):
     # print(f"Applying LoRA parameters to AudioEncoder...")
     log.info(f"Applying LoRA parameters to AudioEncoder...")
-    linear_to_lora_layers(model.encoder, num_layers, rank, alpha, dropout)
+    linear_to_lora_layers(model.encoder, num_layers, rank, target_modules, cross_target_modules, alpha, dropout)
     if verbose:
         # print("Done applying Encoder LoRA Linear layers")
         log.info("Done applying Encoder LoRA Linear layers")
@@ -107,7 +110,7 @@ def linear_to_lora(model, num_layers, rank=64, alpha=64, dropout=0.1, verbose=Tr
         log.info(f"Encoder: Trainable parameters {enc_tra_params:.3f}M")
 
     log.info(f"Applying LoRA parameters to TextDecoder...")
-    linear_to_lora_layers(model.decoder, num_layers, rank, alpha, dropout)
+    linear_to_lora_layers(model.decoder, num_layers, rank, target_modules, cross_target_modules, alpha, dropout)
     if verbose:
         log.info("Done applying Decoder LoRA Linear layers")
         dec_tot_params = (

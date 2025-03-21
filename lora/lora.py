@@ -193,10 +193,10 @@ def load_seanghay(args):
 
     dataset2 = concatenate_datasets([dataset1, dataset2])
     dataset2 = dataset2.shuffle()
-    dataset2 = dataset2.train_test_split(test_size=0.2)
-    train, valid = dataset2['train'], dataset2['test']
+    # dataset2 = dataset2.train_test_split(test_size=0.2)
+    # train, valid = dataset2['train'], dataset2['test']
 
-    return train, valid
+    return dataset2, [-1]
 
 
 def load_test(args):
@@ -353,7 +353,8 @@ def get_array_tokens(texts: List[str], tokenizer: Tokenizer, max_seq_length: int
 
 def evaluate(model, dataset, loss, tokenizer, batch_size, num_batches):
     all_losses = []
-    all_wers = []
+    references = []
+    predictions = []
     ntokens = 0
     for it, batch in zip(
         range(num_batches),
@@ -361,21 +362,27 @@ def evaluate(model, dataset, loss, tokenizer, batch_size, num_batches):
                         model_n_mels=model.dims.n_mels),
     ):
         # losses, ntoks = loss(model, *batch)
-        losses, ntoks, wers = word_error(model, tokenizer, *batch)
+        losses, ntoks, l_list, t_list = loss_and_transcription(model, tokenizer, *batch)
         all_losses.append((losses * ntoks).item())
-        all_wers.append(wers)
         ntokens += ntoks
         mx.eval(all_losses, ntokens)
+        #all_wers.append(wers)
+        predictions += l_list
+        references += t_list
 
-    return np.sum(all_losses) / ntokens, np.mean(all_wers)
+    # return np.sum(all_losses) / ntokens, np.mean(all_wers)
+    wer = metric_wer.compute(references=references, predictions=predictions)
+    return np.sum(all_losses) / ntokens, wer
 
 
-def word_error(model, tokenizer, mels, dec_input_tokens, target_tokens, token_lengths):
-    logits = model(mels, dec_input_tokens)
-    # logits = model(mels, target_tokens)
-    logits = logits.astype(mx.float32)
-    length_mask = mx.arange(target_tokens.shape[1])[
-        None, :] < token_lengths[:, None]
+def loss_and_transcription(model, tokenizer, mels, dec_input_tokens, target_tokens, token_lengths):
+    # logits = model(mels, dec_input_tokens)
+    # logits = logits.astype(mx.float32)
+    # length_mask = mx.arange(target_tokens.shape[1])[
+    #     None, :] < token_lengths[:, None]
+
+    logits, length_mask = get_logits_and_length_mask(model, mels, dec_input_tokens, target_tokens, token_lengths)
+
     ce = nn.losses.cross_entropy(logits, target_tokens) * length_mask
     ntoks = length_mask.sum()
     ce = ce.sum() / ntoks
@@ -384,46 +391,44 @@ def word_error(model, tokenizer, mels, dec_input_tokens, target_tokens, token_le
     logits = np.array(mx.argmax(logits, axis=2), dtype=np.uint32)
     target_tokens = np.array(target_tokens, dtype=np.uint32)
 
-    l_list, t_list= [], []
-
     special_tokens = tokenizer.special_tokens.values()
-    # l = np.argmax(logits[0], axis=1)
-    # print(tokenizer.decode(l))
-    # l = [token for token in l if token not in special_tokens]
-    # t = [token for token in target_tokens[0] if token not in special_tokens]
-    # # print(len(t), len(target_tokens[0]))
+    # print(tokenizer.decode(logits[0]))
+    # l = [token for token in logits[0][length_mask[0]] if token not in special_tokens]
+    # t = [token for token in target_tokens[0][length_mask[0]] if token not in special_tokens]
+    # # print(len(t), len(target_tokens[0][length_mask[0]]))
 
     # l = tokenizer.decode(l)
     # # print("predi", l)
-
     # t = tokenizer.decode(t)
     # print("label", t)
     # print("*************************")
 
+    l_list, t_list= [], []
     for lm, l, t in zip(length_mask, logits, target_tokens):
-        # l = np.argmax(l, axis=1)
         # remove padding
         l = l[lm]
         t = t[lm]
         # remove special tokens
         l = [token for token in l if token not in special_tokens]
         t = [token for token in t if token not in special_tokens]
-
+        # get transcription
         l = tokenizer.decode(l)
         t = tokenizer.decode(t)
         # print(l, "\n", t, "\n", 20*"-")
         l_list.append(l)
         t_list.append(t)
-    wer = metric_wer.compute(references=t_list, predictions=l_list)
-    return ce, ntoks, wer
+    #wer = metric_wer.compute(references=t_list, predictions=l_list)
+    #return ce, ntoks, wer
+    return ce, ntoks, l_list, t_list
 
 
 def loss(model: Whisper, mels: mx.array, dec_input_tokens: mx.array, target_tokens: mx.array, token_lengths: mx.array) -> Tuple[mx.array, int]:
     # Run model on inputs
-    logits: mx.array = model(mels, dec_input_tokens)
-    logits = logits.astype(mx.float32)
-    length_mask: mx.array = mx.arange(target_tokens.shape[1])[
-        None, :] < token_lengths[:, None]
+    # logits: mx.array = model(mels, dec_input_tokens)
+    # logits = logits.astype(mx.float32)
+    # length_mask: mx.array = mx.arange(target_tokens.shape[1])[
+    #     None, :] < token_lengths[:, None]
+    logits, length_mask = get_logits_and_length_mask(model, mels, dec_input_tokens, target_tokens, token_lengths)
 
     ce: mx.array = nn.losses.cross_entropy(logits, target_tokens) * length_mask
     ntoks: int = length_mask.sum()
@@ -432,7 +437,17 @@ def loss(model: Whisper, mels: mx.array, dec_input_tokens: mx.array, target_toke
     return ce, ntoks
 
 
-def train(model, train_set, val_set, loss, tokenizer, args, num_iters, val_num_iters):
+def get_logits_and_length_mask(model: Whisper, mels: mx.array, dec_input_tokens: mx.array, target_tokens: mx.array, token_lengths: mx.array):
+    # Run model on inputs
+    logits: mx.array = model(mels, dec_input_tokens)
+    logits = logits.astype(mx.float32)
+    length_mask: mx.array = mx.arange(target_tokens.shape[1])[
+        None, :] < token_lengths[:, None]
+    return logits, length_mask
+
+
+# def train(model, train_set, val_set, loss, tokenizer, args, num_iters, val_num_iters):
+def train(model, train_set, loss, tokenizer, args, num_iters):
     log.info("Training")
     # optimizer = optim.Adam(learning_rate=args.learning_rate)
     warmup_steps = 0.05*num_iters
@@ -496,15 +511,15 @@ def train(model, train_set, val_set, loss, tokenizer, args, num_iters, val_num_i
         # Report validation loss if needed
         if it == 0 or (it + 1) % args.steps_per_eval == 0:
             stop = time.perf_counter()
-            val_loss, wer = evaluate(
-                model, val_set, loss, tokenizer, args.batch_size, args.val_batches
-            )
-            log.info(
-                f"Iter {it + 1}: "
-                f"Val loss {val_loss:.3f}, "
-                f"Val wer {wer:.3f}, "
-                f"Val took {(time.perf_counter() - stop):.3f}s"
-            )
+            # val_loss, wer = evaluate(
+            #     model, val_set, loss, tokenizer, args.batch_size, args.val_batches
+            # )
+            # log.info(
+            #     f"Iter {it + 1}: "
+            #     f"Val loss {val_loss:.3f}, "
+            #     f"Val wer {wer:.3f}, "
+            #     f"Val took {(time.perf_counter() - stop):.3f}s"
+            # )
             transcribe("./tests/voice5.mp3", model=model,
                        verbose=True, fp16=eval(args.fp16))
             start = time.perf_counter()
@@ -520,15 +535,15 @@ def train(model, train_set, val_set, loss, tokenizer, args, num_iters, val_num_i
         # Final validation loss if needed
         if (it + 1) == num_iters:
             stop = time.perf_counter()
-            val_loss, wer = evaluate(
-                model, val_set, loss, tokenizer, args.batch_size, val_num_iters
-            )
-            log.info(
-                f"Iter {it + 1}: "
-                f"Val loss {val_loss:.3f}, "
-                f"Val wer {wer:.3f}, "
-                f"Val took {(time.perf_counter() - stop):.3f}s"
-            )
+            # val_loss, wer = evaluate(
+            #     model, val_set, loss, tokenizer, args.batch_size, val_num_iters
+            # )
+            # log.info(
+            #     f"Iter {it + 1}: "
+            #     f"Val loss {val_loss:.3f}, "
+            #     f"Val wer {wer:.3f}, "
+            #     f"Val took {(time.perf_counter() - stop):.3f}s"
+            # )
             transcribe("./tests/voice5.mp3", model=model,
                        verbose=True, fp16=eval(args.fp16))
             mx.savez(
@@ -553,7 +568,7 @@ if __name__ == "__main__":
 
     # # Freeze all layers & create LORA layers
     model.freeze()
-    lora_utils.linear_to_lora(model, args.lora_layers, rank=64, alpha=64, dropout=0.1)
+    lora_utils.linear_to_lora(model, args.lora_layers, rank=64, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=64, dropout=0.02858)
 
     # Load dataset
     log.info("Loading datasets")
@@ -569,9 +584,10 @@ if __name__ == "__main__":
     if args.train:
         train_set, val_set = load_seanghay(args)
         num_iters = int(train_set.num_rows/ args.batch_size)
-        val_num_iters = int(val_set.num_rows/ args.batch_size)
+        # val_num_iters = int(val_set.num_rows/ args.batch_size)
         # Train model
-        train(model, train_set.to_iterable_dataset(), val_set.to_iterable_dataset(), loss, tokenizer, args, args.iters, val_num_iters)
+        # train(model, train_set.to_iterable_dataset(), val_set.to_iterable_dataset(), loss, tokenizer, args, args.iters, val_num_iters)
+        train(model, train_set.to_iterable_dataset(), loss, tokenizer, args, args.iters)
 
         # Save adapter weights
         mx.savez(args.adapter_file, **

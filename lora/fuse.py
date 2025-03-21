@@ -21,6 +21,38 @@ def upload_to_hub(path: str, name: str, torch_name_or_path: str, fp16: bool):
         f"""
         ---
         library_name: mlx
+        license: apache-2.0
+        language:
+        - km
+        pipeline_tag: automatic-speech-recognition
+        datasets:
+        - seanghay/km-speech-corpus
+        - seanghay/khmer_mwpt_speech
+        model-index:
+        - name: {name} by Kimang KHUN
+          results:
+          - task:
+              type: automatic-speech-recognition
+              name: Speech Recognition
+            dataset:
+              name: test split of "km_kh" in google/fleurs
+              type: google/fleurs
+            metrics:
+            - type: wer
+              value: 52.3%
+              name: test
+          - task:
+              type: automatic-speech-recognition
+              name: Speech Recognition
+            dataset:
+              name: train split of "SLR42" in openslr/openslr
+              type: openslr/openslr
+            metrics:
+            - type: wer
+              value: 51.2%
+              name: test
+        tags:
+        - Khmer
         ---
         
         # {name}
@@ -29,8 +61,8 @@ def upload_to_hub(path: str, name: str, torch_name_or_path: str, fp16: bool):
         - [seanghay/km-speech-corpus](https://huggingface.com/datasets/seanghay/km-speech-corpus)
 
         It achieves the following __word error rate__ (`wer`) on 2 popular datasets:
-        - ??? on `test` split of [google/fleurs](https://huggingface.co/datasets/google/fleurs) `km-kh`
-        - ??? on `train` split of [openslr/openslr](https://huggingface.co/datasets/openslr/openslr) `SLR42`
+        - 52.3% on `test` split of [google/fleurs](https://huggingface.co/datasets/google/fleurs) `km-kh`
+        - 51.2% on `train` split of [openslr/openslr](https://huggingface.co/datasets/openslr/openslr) `SLR42`
         
         __NOTE__ MLX format is usable for M-chip series of Apple.
         
