@@ -39,30 +39,20 @@ def upload_to_hub(path: str, name: str, torch_name_or_path: str, fp16: bool):
               type: google/fleurs
             metrics:
             - type: wer
-              value: 52.3%
-              name: test
-          - task:
-              type: automatic-speech-recognition
-              name: Speech Recognition
-            dataset:
-              name: train split of "SLR42" in openslr/openslr
-              type: openslr/openslr
-            metrics:
-            - type: wer
-              value: 51.2%
+              value: 58.7%
               name: test
         tags:
         - Khmer
         ---
         
         # {name}
-        This model was converted to MLX format from [`{torch_name_or_path}`](https://github.com/openai/whisper), then fine-tined to Khmer language using two datasets:
+        This model was converted to MLX format from [`{torch_name_or_path}`](https://github.com/openai/whisper), then fine-tined to Khmer language using three datasets:
         - [seanghay/khmer_mpwt_speech](https://huggingface.com/datasets/seanghay/khmer_mpwt_speech)
         - [seanghay/km-speech-corpus](https://huggingface.com/datasets/seanghay/km-speech-corpus)
+        - `train` split of [openslr/openslr](https://huggingface.co/datasets/openslr/openslr) `SLR42`
 
         It achieves the following __word error rate__ (`wer`) on 2 popular datasets:
-        - 52.3% on `test` split of [google/fleurs](https://huggingface.co/datasets/google/fleurs) `km-kh`
-        - 51.2% on `train` split of [openslr/openslr](https://huggingface.co/datasets/openslr/openslr) `SLR42`
+        - 58.7% on `test` split of [google/fleurs](https://huggingface.co/datasets/google/fleurs) `km-kh`
         
         __NOTE__ MLX format is usable for M-chip series of Apple.
         
@@ -156,11 +146,16 @@ if __name__ == "__main__":
 
     # Load adapters and get number of LoRA layers
     adapters = list(mx.load(args.adapter_file).items())
-    lora_layers = int(len([m for m in adapters if "query.lora_a" in m[0]])/3) #NOTE: divide by 2 cuz encoder and decoder were count together
+    # lora_layers = int(len([m for m in adapters if "query.lora_a" in m[0]])/3) #NOTE: divide by 2 cuz encoder and decoder were count together
+    lora_layers = 6 # 10 # 6 # 4
 
     # Freeze all layers other than LORA linears
     model.freeze()
-    lora_utils.linear_to_lora(model, lora_layers, verbose=False)
+    # lora_utils.linear_to_lora(model, args.lora_layers, rank=192, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=192, dropout=0.02858)
+    lora_utils.linear_to_lora(model, lora_layers, rank=128, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=128, dropout=0.02858)
+    # lora_utils.linear_to_lora(model, lora_layers, verbose=False)
+    # lora_utils.linear_to_lora(model, lora_layers, rank=64, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=64, dropout=0.02858)
+    #lora_utils.linear_to_lora(model, lora_layers, rank=24, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=32, dropout=0.0)
 
     model.update(tree_unflatten(adapters))
     fused_linears = [

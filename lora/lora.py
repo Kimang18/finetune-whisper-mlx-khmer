@@ -36,6 +36,7 @@ import tha.datetime
 import tha.decimals
 import tha.ordinals
 import tha.currency
+import tha.repeater
 
 # Huggingface datasets
 from datasets import load_dataset, Audio, concatenate_datasets, IterableDataset
@@ -138,21 +139,52 @@ def build_parser():
     return parser
 
 
-def load_google(args):
+def load_google(args, split="test"):
     hf_dataset = "google/fleurs"
-
     hf_dataset_lang = "km_kh"
     log.info(f"Loading dataset {hf_dataset}, {hf_dataset_lang} from hugging face")
-
     dataset = load_dataset(
         hf_dataset,
         hf_dataset_lang,
         trust_remote_code=True,
+        split=split
     )
     dataset = dataset.select_columns(["audio", "transcription"])
     dataset = dataset.map(transform_khmer_sentence)
     dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
-    return dataset['train'], dataset['validation'], dataset['test']
+    return dataset
+
+
+def load_openslr(args, split="train"):
+    ds_openslr = load_dataset(
+        "openslr",
+        "SLR42",
+        trust_remote_code=True,
+        split=split
+    )
+    ds_openslr = ds_openslr.rename_column("sentence", "transcription")
+    ds_openslr = ds_openslr.select_columns(["audio", "transcription"])
+    ds_openslr = ds_openslr.map(transform_khmer_sentence)
+    ds_openslr = ds_openslr.cast_column("audio", Audio(sampling_rate=16000))
+    return ds_openslr
+
+
+def load_mix_2(args):
+    # dataset1 = load_google(args, "train")
+    dataset1 = load_dataset("seanghay/khmer_mpwt_speech")
+    dataset1 = dataset1.select_columns(["audio", "transcription"])
+    dataset1 = dataset1.map(transform_khmer_sentence)
+    dataset1 = dataset1['train'].cast_column("audio", Audio(sampling_rate=16000))
+
+    dataset2 = load_dataset("seanghay/km-speech-corpus")
+    dataset2 = dataset2.select_columns(["audio", "transcription"])
+    dataset2 = dataset2.map(transform_khmer_sentence)
+    dataset2 = dataset2['train'].cast_column("audio", Audio(sampling_rate=16000))
+
+    dataset3 = load_openslr(args, "train")
+    dataset3 = concatenate_datasets([dataset1, dataset2, dataset3])
+    dataset3 = dataset3.shuffle()
+    return dataset3
 
 
 def load_mix(args):
@@ -196,39 +228,34 @@ def load_seanghay(args):
     # dataset2 = dataset2.train_test_split(test_size=0.2)
     # train, valid = dataset2['train'], dataset2['test']
 
-    return dataset2, [-1]
+    return dataset2
 
 
-def load_test(args):
-    hf_dataset = "google/fleurs"
-    hf_dataset_lang = "km_kh"
-    log.info(f"Loading dataset {hf_dataset}, {hf_dataset_lang} from hugging face")
-    dataset_g = load_dataset(
-        hf_dataset,
-        hf_dataset_lang,
-        trust_remote_code=True,
-        split="test"
-    )
-    dataset_g = dataset_g.map(transform_khmer_sentence)
-    dataset_g = dataset_g.cast_column("audio", Audio(sampling_rate=16000))
-
-    ds_openslr = load_dataset(
-        "openslr",
-        "SLR42",
-        trust_remote_code=True,
-        split="train"
-    )
-    ds_openslr = ds_openslr.rename_column("sentence", "transcription")
-    ds_openslr = ds_openslr.map(transform_khmer_sentence)
-    ds_openslr = ds_openslr.cast_column("audio", Audio(sampling_rate=16000))
-    return dataset_g, ds_openslr
+def process_repeater(words: List[str]) -> List[str]:
+    fake_tokens = []
+    for word in words:
+        if word == 'ៗ':
+            break
+        fake_tokens.append(word)
+    if len(fake_tokens) < len(words): # there is repeater
+        def fake_tokenizer(_):
+            return fake_tokens
+        transcription = tha.repeater.processor(' '.join(words), tokenizer=fake_tokenizer)
+        words = [word for word in word_tokenize(transcription.replace('▁', ''), return_tokens=True) if word != ' ']
+    return words
 
 
 def transform_khmer_sentence(ds) -> Dict:
     transcription = tha.normalize.processor(ds["transcription"])
-    l = [w for w in word_tokenize(transcription, return_tokens=True) if w != " "]
-    for j in range(len(l)):
-        w = l[j]
+    words = [w for w in word_tokenize(transcription, return_tokens=True) if w != " "]
+    # check repeater
+    old_words = []
+    while words != old_words:
+        old_words = list(words)
+        words = process_repeater(words)
+    # standardize numbers and times
+    for j in range(len(words)):
+        w = words[j]
         if "$" in w or "៛" in w:
             w = tha.currency.processor(w)
         else:
@@ -236,10 +263,24 @@ def transform_khmer_sentence(ds) -> Dict:
             w = tha.datetime.date_processor(w)
             w = tha.decimals.processor(w)
             w = tha.ordinals.processor(w)
-        l[j] = w.replace("▁", " ")
-    transcription = " ".join(l)
+        words[j] = w.replace("▁", " ")
+
+    # retokenize again after standardize
+    ll = []
+    j = 0
+    while j < len(words):
+        if words[j] == 'ចិត' and words[j+1] == 'សិប':
+            ll.append('ចិតសិប')
+            j += 1
+        elif words[j] != ' ':
+            ll.append(words[j])
+        elif words[j] == '?':
+            ll[j-1] += '?'
+        j += 1
+    transcription = " ".join(ll)
     #transcription = word_tokenize(ds["transcription"], return_tokens=False, separator=" ")
     return {"transcription": transcription}
+
 
 def iterate_batches(dset: IterableDataset, tokenizer: Tokenizer, batch_size: int, dtype=mx.float16, model_n_mels: int = 80, max_seq_length: int = 448, train: bool = False) -> Iterator[BatchInput]:
     # Shuffle indices
@@ -260,16 +301,16 @@ def iterate_batches(dset: IterableDataset, tokenizer: Tokenizer, batch_size: int
 
             if len(ds) == 0:
                 break
-            batch_arr_mels: mx.array = get_array_mel_segments(
-                [ds[j]['audio']['array'] for j in range(len(ds))],
-                model_n_mels,
-                dtype
-            )
-
-            batch_arr_text_tokens, batch_arr_target_tokens, batch_token_lengths = get_array_tokens(
+            batch_arr_text_tokens, batch_arr_target_tokens, batch_token_lengths, idxs_chosen_transcription = get_array_tokens(
                 [ds[j]["transcription"] for j in range(len(ds))],
                 tokenizer,
                 max_seq_length
+            )
+
+            batch_arr_mels: mx.array = get_array_mel_segments(
+                [ds[j]['audio']['array'] for j in idxs_chosen_transcription],
+                model_n_mels,
+                dtype
             )
 
             yield BatchInput(input_features=batch_arr_mels,
@@ -313,7 +354,7 @@ def get_array_mel_segments(audio_arrs: List[np.array], n_mels: int, dtype) -> mx
     )
 
 
-def get_array_tokens(texts: List[str], tokenizer: Tokenizer, max_seq_length: int) -> Tuple[mx.array, mx.array, mx.array]:
+def get_array_tokens(texts: List[str], tokenizer: Tokenizer, max_seq_length: int) -> Tuple[mx.array, mx.array, mx.array, List[int]]:
     batch_size: int = len(texts)
     batch: List[List[int]] = [
         [*tokenizer.sot_sequence_including_notimestamps] +
@@ -328,6 +369,53 @@ def get_array_tokens(texts: List[str], tokenizer: Tokenizer, max_seq_length: int
     # Pad to the nearest multiple of 8 or the maximum length
     pad_to: int = 8
     max_length_in_batch: int = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
+    # print(max_length_in_batch)
+    max_length_in_batch = min(max_length_in_batch, max_seq_length)
+
+    # batch_arr: np.array = tokenizer.eot * np.ones(
+    #     (batch_size, max_length_in_batch), np.int32)
+    # batch_arr_tars: np.array = tokenizer.eot * np.ones_like(batch_arr)
+    batch_arr = []
+    batch_arr_tars = []
+    idxs_chosen_transcription = []
+    new_lengths = []
+    for j in range(batch_size):
+        if lengths[j] <= max_seq_length: # ignore too long transcription
+            truncated_length: int = min(lengths[j], max_seq_length)
+            batch_arr.append(tokenizer.eot * np.ones(max_length_in_batch, dtype=np.int32))
+            batch_arr[-1][:truncated_length] = batch[j][:truncated_length]
+            batch_arr_tars.append(tokenizer.eot * np.ones(max_length_in_batch, dtype=np.int32))
+            batch_arr_tars[-1][:truncated_length-1] = batch_target[j][:truncated_length-1]
+            new_lengths.append(truncated_length-1)
+            idxs_chosen_transcription.append(j)
+
+    # sanity check
+    # special_tokens = tokenizer.special_tokens.values()
+    # for x, xx, t in zip(batch_arr, batch_arr_tars, texts):
+    #     print(tokenizer.decode([tok for tok in x if tok not in special_tokens]))
+    #     print(tokenizer.decode([tok for tok in xx if tok not in special_tokens]))
+    #     print(word_tokenize(t, separator=" ", return_tokens=False))
+
+    batch_arr_text_tokens: mx.array = mx.array(np.array(batch_arr), dtype=mx.int32)
+    batch_arr_target_tokens: mx.array = mx.array(np.array(batch_arr_tars), dtype=mx.int32)
+    return batch_arr_text_tokens, batch_arr_target_tokens, mx.array(new_lengths), idxs_chosen_transcription
+
+def get_array_tokens_old(texts: List[str], tokenizer: Tokenizer, max_seq_length: int) -> Tuple[mx.array, mx.array, mx.array]:
+    batch_size: int = len(texts)
+    batch: List[List[int]] = [
+        [*tokenizer.sot_sequence_including_notimestamps] +
+            tokenizer.encode(text)
+        for text in texts]
+    for x in batch:
+        if x[-1] != tokenizer.eot:
+            x.append(tokenizer.eot)
+    batch_target: List[List[int]] = [x[1:] for x in batch]
+
+    lengths: List[int] = [len(x) for x in batch]
+    # Pad to the nearest multiple of 8 or the maximum length
+    pad_to: int = 8
+    max_length_in_batch: int = pad_to * ((max(lengths) + pad_to - 1) // pad_to)
+    # print(max_length_in_batch)
     max_length_in_batch = min(max_length_in_batch, max_seq_length)
 
     batch_arr: np.array = tokenizer.eot * np.ones(
@@ -446,12 +534,12 @@ def get_logits_and_length_mask(model: Whisper, mels: mx.array, dec_input_tokens:
     return logits, length_mask
 
 
-# def train(model, train_set, val_set, loss, tokenizer, args, num_iters, val_num_iters):
-def train(model, train_set, loss, tokenizer, args, num_iters):
-    log.info("Training")
+def train(model, train_set, val_set, loss, tokenizer, args, num_iters, val_num_iters):
+# def train(model, train_set, loss, tokenizer, args, num_iters):
+    log.info(f"Training over {num_iters} iterations")
     # optimizer = optim.Adam(learning_rate=args.learning_rate)
-    warmup_steps = 0.05*num_iters
-    decay_steps2 = 0.1*num_iters
+    warmup_steps = int(0.05*num_iters)
+    decay_steps2 = int(0.1*num_iters)
     decay_steps1 = num_iters - warmup_steps - decay_steps2
     warmup = optim.linear_schedule(0.0, args.learning_rate, steps=warmup_steps)
     # lin_decay = optim.linear_schedule(args.learning_rate, 0.0, steps=decay_steps)
@@ -472,6 +560,8 @@ def train(model, train_set, loss, tokenizer, args, num_iters):
     # Create value and grad function for loss
     loss_value_and_grad = nn.value_and_grad(model, loss)
 
+    old_wer = 1e5 # initialize
+    new_wer = 1e5 # initialize
     losses = []
     n_tokens = 0
     start = time.perf_counter()
@@ -511,44 +601,54 @@ def train(model, train_set, loss, tokenizer, args, num_iters):
         # Report validation loss if needed
         if it == 0 or (it + 1) % args.steps_per_eval == 0:
             stop = time.perf_counter()
-            # val_loss, wer = evaluate(
-            #     model, val_set, loss, tokenizer, args.batch_size, args.val_batches
-            # )
-            # log.info(
-            #     f"Iter {it + 1}: "
-            #     f"Val loss {val_loss:.3f}, "
-            #     f"Val wer {wer:.3f}, "
-            #     f"Val took {(time.perf_counter() - stop):.3f}s"
-            # )
+            model.eval()
+            val_loss, new_wer = evaluate(
+                model, val_set, loss, tokenizer, args.batch_size, val_num_iters
+            )
+            log.info(
+                f"Iter {it + 1}: "
+                f"Val loss {val_loss:.3f}, "
+                f"Val wer {new_wer:.3f}, "
+                f"Val took {(time.perf_counter() - stop):.3f}s"
+            )
             transcribe("./tests/voice5.mp3", model=model,
                        verbose=True, fp16=eval(args.fp16))
             start = time.perf_counter()
 
         # Save adapter weights if needed
         if (it + 1) % args.save_every == 0:
-            mx.savez(
-                args.adapter_file, **dict(tree_flatten(model.trainable_parameters()))
-            )
-            log.info(
-                f"Iter {it + 1}: Saved adapter weights to {args.adapter_file}.")
+            if new_wer < old_wer:
+                mx.savez(
+                    args.adapter_file, **dict(tree_flatten(model.trainable_parameters()))
+                )
+                log.info(
+                    f"Iter {it + 1}: Saved adapter weights to {args.adapter_file}.")
+                old_wer = new_wer
+            else:
+                log.info(
+                    f"Iter {it + 1}: Not save cuz not best model.")
 
         # Final validation loss if needed
         if (it + 1) == num_iters:
             stop = time.perf_counter()
-            # val_loss, wer = evaluate(
-            #     model, val_set, loss, tokenizer, args.batch_size, val_num_iters
-            # )
-            # log.info(
-            #     f"Iter {it + 1}: "
-            #     f"Val loss {val_loss:.3f}, "
-            #     f"Val wer {wer:.3f}, "
-            #     f"Val took {(time.perf_counter() - stop):.3f}s"
-            # )
+            model.eval()
+            val_loss, new_wer = evaluate(
+                model, val_set, loss, tokenizer, args.batch_size, val_num_iters
+            )
+            log.info(
+                f"Iter {it + 1}: "
+                f"Val loss {val_loss:.3f}, "
+                f"Val wer {new_wer:.3f}, "
+                f"Val took {(time.perf_counter() - stop):.3f}s"
+            )
             transcribe("./tests/voice5.mp3", model=model,
                        verbose=True, fp16=eval(args.fp16))
-            mx.savez(
-                args.adapter_file, **dict(tree_flatten(model.trainable_parameters()))
-            )
+            if new_wer < old_wer:
+                mx.savez(
+                    args.adapter_file, **dict(tree_flatten(model.trainable_parameters()))
+                )
+                log.info(
+                    f"Iter {it + 1}: Saved adapter weights to {args.adapter_file}.")
 
 
 if __name__ == "__main__":
@@ -568,13 +668,15 @@ if __name__ == "__main__":
 
     # # Freeze all layers & create LORA layers
     model.freeze()
-    lora_utils.linear_to_lora(model, args.lora_layers, rank=64, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=64, dropout=0.02858)
+    # lora_utils.linear_to_lora(model, args.lora_layers, rank=192, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=192, dropout=0.02858)
+    lora_utils.linear_to_lora(model, args.lora_layers, rank=128, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=128, dropout=0.02858)
+    # lora_utils.linear_to_lora(model, args.lora_layers, rank=64, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=64, dropout=0.02858)
+    # lora_utils.linear_to_lora(model, args.lora_layers, rank=24, target_modules=['query', 'key', 'value', 'out'], cross_target_modules=['query', 'key', 'value', 'out'], alpha=32, dropout=0.0)
 
     # Load dataset
     log.info("Loading datasets")
     # load_google(args)  # load(args)
     # train_set, val_set, test_set = load_mix(args)
-    # train_set, val_set, test_set = load_google(args)
 
     # Resume training the given adapters.
     if args.resume_adapter_file is not None:
@@ -582,16 +684,19 @@ if __name__ == "__main__":
         model.load_weights(args.resume_adapter_file, strict=False)
 
     if args.train:
-        train_set, val_set = load_seanghay(args)
-        num_iters = int(train_set.num_rows/ args.batch_size)
-        # val_num_iters = int(val_set.num_rows/ args.batch_size)
+        #train_set = load_seanghay(args)
+        train_set = load_mix_2(args)
+        val_set = load_google(args, split="test")
+        num_iters = math.ceil(train_set.num_rows / args.batch_size)
+        val_num_iters = int(val_set.num_rows/ args.batch_size)
+        nb_epoch = 8
         # Train model
-        # train(model, train_set.to_iterable_dataset(), val_set.to_iterable_dataset(), loss, tokenizer, args, args.iters, val_num_iters)
-        train(model, train_set.to_iterable_dataset(), loss, tokenizer, args, args.iters)
+        train(model, train_set.to_iterable_dataset(), val_set.to_iterable_dataset(), loss, tokenizer, args, nb_epoch*num_iters, val_num_iters)
+        # train(model, train_set.to_iterable_dataset(), loss, tokenizer, args, 8*num_iters)
 
         # Save adapter weights
-        mx.savez(args.adapter_file, **
-                 dict(tree_flatten(model.trainable_parameters())))
+        # mx.savez(args.adapter_file, **
+        #          dict(tree_flatten(model.trainable_parameters())))
 
     # Load the LoRA adapter weights which we assume should exist by this point
     if not Path(args.adapter_file).is_file():
@@ -604,8 +709,7 @@ if __name__ == "__main__":
 
     if args.test:
         log.info("Testing")
-        test_set1, test_set2 = load_test(args)
-
+        test_set1 = load_google(args, split="test")
         test_num_iters = int(test_set1.num_rows/ args.batch_size)
         model.eval()
         test_loss, test_wer = evaluate(
@@ -621,16 +725,17 @@ if __name__ == "__main__":
         log.info(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")
         log.info(f"Google Test wer {test_wer:.3f}.")
 
-        test_num_iters = int(test_set2.num_rows/ args.batch_size)
-        test_loss, test_wer = evaluate(
-            model,
-            test_set2.to_iterable_dataset(),
-            loss,
-            tokenizer,
-            args.batch_size,
-            num_batches=test_num_iters,
-        )
-        test_ppl = math.exp(test_loss)
+        # test_set2 = load_openslr(args, split="train")
+        # test_num_iters = int(test_set2.num_rows/ args.batch_size)
+        # test_loss, test_wer = evaluate(
+        #     model,
+        #     test_set2.to_iterable_dataset(),
+        #     loss,
+        #     tokenizer,
+        #     args.batch_size,
+        #     num_batches=test_num_iters,
+        # )
+        # test_ppl = math.exp(test_loss)
 
-        log.info(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")
-        log.info(f"OPENSLR Test wer {test_wer:.3f}.")
+        # log.info(f"Test loss {test_loss:.3f}, Test ppl {test_ppl:.3f}.")
+        # log.info(f"OPENSLR Test wer {test_wer:.3f}.")
